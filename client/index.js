@@ -26,9 +26,9 @@
  * Registration forms follow the decoration template and ui-plan /
  * ui-workflow-run precedents; React comes from the platform seed table only.
  *
- * @module @local/inline-charts/client
+ * @module zznobzz-dsh-inline-charts/client
  */
-window.__ModuleLoader__.load({ id: '@local/inline-charts', factory: (require) => {
+window.__ModuleLoader__.load({ id: 'zznobzz-dsh-inline-charts', factory: (require) => {
   'use strict';
 
   const React = require('react');
@@ -184,8 +184,8 @@ window.__ModuleLoader__.load({ id: '@local/inline-charts', factory: (require) =>
     if (chartCtor !== undefined) return Promise.resolve(chartCtor);
     if (chartLoadPromise === undefined) {
       // Documented chunk protocol: require.async on the package-local sibling
-      // loads `<plugins>/@local/inline-charts/client.chartjs.js?rev=<current>`
-      // — the scoped package name is a two-segment path prefix — as a classic
+      // loads `<plugins>/zznobzz-dsh-inline-charts/client.chartjs.js?rev=<current>`
+      // — the flattened package name is one path segment — as a classic
       // script which registers the sibling factory and assigns window.Chart
       // (UMD). Failures are retryable (the promise is reset).
       chartLoadPromise = require.async('./client.chartjs.js').then(

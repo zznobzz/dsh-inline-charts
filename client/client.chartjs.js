@@ -16,5 +16,5 @@
 // The UMD above already assigned window.Chart when this classic script executed; this
 // registration only satisfies the module system so require.async("./client.chartjs.js")
 // resolves (system.ts importChunk). The factory itself stays side-effect-free.
-window.__ModuleLoader__.load({ id: "@local/inline-charts", chunk: "client.chartjs.js",
+window.__ModuleLoader__.load({ id: "zznobzz-dsh-inline-charts", chunk: "client.chartjs.js",
   factory: function () { return { chart: typeof window !== "undefined" ? window.Chart : undefined }; } });
