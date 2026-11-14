@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Inline charts",
+    "description": "Renders interactive Chart.js charts and sandboxed HTML/JS widgets inline in the chat, plus the render_chart agent tool that emits them."
+  }
+}
