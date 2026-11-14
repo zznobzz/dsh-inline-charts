@@ -136,11 +136,16 @@ Widget монтируется только на settled durable `tool/result` (l
 
 Требования: DeepSeek Harness (DSH) с Web GUI, профиль-директория на хосте.
 
-1. Скачайте репозиторий и укажите путь к нему при установке бандла:
-   ```bash
-   git clone https://github.com/zznobzz/dsh-inline-charts.git
-   ```
-2. В DSH-агенте этого профиля выполните установку бандла из директории плагина (`plugin_manager action=install_bundle`, target — абсолютный путь к клону). Либо добавьте вручную в `cordis.patch.yml` профиля строку `insert` из `cordis.patch.yml` этого пакета и подключите пакет как зависимость профиля.
+**Способ 1 (рекомендуемый): локальный клон.**
+```bash
+git clone https://github.com/zznobzz/dsh-inline-charts.git
+```
+В агенте DSH нужного профиля выполните установку бандла (`plugin_manager action=install_bundle`, target — абсолютный путь к клону).
+
+**Способ 2: установка из GitHub напрямую** (профили DSH хранят зависимость в формате pnpm git-ссылки):
+в `package.json` профиля в `dsh.profile.bundles` добавьте `"github:zznobzz/dsh-inline-charts#v1.0.1"` и обновите зависимости профиля. Имя пакета (`zznobzz-dsh-inline-charts`) легально для npm/pnpm, поэтому git-установка работает без ошибок вида ERR_PNPM_BAD_PACKAGE_JSON.
+
+После установки перезагрузите страницу GUI. Проверка монтирования:
 3. Перезагрузите страницу GUI. Проверка монтирования:
    - агентский инструмент `render_chart` виден в списке инструментов новой сессии;
    - в ленте чата сообщение с результатом `render_chart` показывает живой график.
