@@ -2,21 +2,27 @@
  * inline-charts (client half): live inline rendering of `render_chart` results
  * in the Harness Web GUI chat.
  *
- * Wire v1.1 (README.md, frozen by the captain): the RENDER channel is the
- * durable `tool/result.meta` envelope `{protocol:'dsh.inline-chart', version:1,
- * kind, spec}` written by host/index.js through `output.presentationMeta`.
- * The fenced ```chart-json / ```chart-html block in model content is a
- * human-readable transcript only and is NEVER parsed for rendering.
+ * Wire v1.2 (README.md, frozen by the captain after t21/t22): the RENDER
+ * channel is the durable `tool/result.meta` envelope
+ * `{protocol:'dsh.inline-chart', version:1, kind, spec}` written by
+ * host/index.js through `output.presentationMeta`. The fenced ```chart-json /
+ * ```chart-html block in model content is a human-readable transcript only
+ * and is NEVER parsed for rendering.
  *
- * Mechanism (plugin-api-notes.md §5-C + §Implementation hints + §t13):
- * - a ConversationNodeDefinition (`kind:'inline-chart', target:'chat'`) matches
- *   append-surface `tool/result` events whose meta decodes to our envelope;
- *   identity = `String(event.data.message.source.callId)` (one call = one
- *   widget; replay/fork reproduce the same id);
- * - a keyed renderer registered at `conversation.chat.node` under key
- *   `inline-chart` draws `node.data`: Chart.js on a canvas, or a sandboxed
- *   iframe for HTML widgets. Official assistant-step/tool renderers are not
- *   touched; the official tool card stays visible next to the widget row.
+ * Mechanism (plugin-api-notes.md §Implementation hints, ui-schedule precedent):
+ * - a state-only ConversationNodeDefinition (`kind:'inline-charts'`, NO target)
+ *   matches append-surface `tool/result` events whose meta decodes to our
+ *   envelope; Context identity is the TURN number (`String(event.data.turn)`),
+ *   so one Context accumulates every chart of its Turn, deduped/replaced by the
+ *   per-item callId identity (replay/fork reproduce both);
+ * - the Definition publishes the accumulated list through `buildLocationData`
+ *   at scope 'turn' under key 'inline-charts' (the engine requires
+ *   data.key === definition.kind), i.e. into ConversationTurnDataMap;
+ * - the renderer is ONE list entry in the official `conversation.chat.turnTail`
+ *   slot (`id:'inline-charts.row'`): keyed `conversation.chat.node` dispatch is
+ *   closed to ChatNodeKind (t21 verdict) and plain JS cannot extend it, so the
+ *   custom kind never relied on here. Widgets render at the end of their closed
+ *   Turn; the official tool card stays visible as usual.
  *
  * Chart.js is vendored as a package-local classic-script chunk
  * (`client.chartjs.js`, UMD -> window.Chart), loaded lazily through the
@@ -185,7 +191,7 @@ window.__ModuleLoader__.load({ id: 'zznobzz-dsh-inline-charts', factory: (requir
     if (chartLoadPromise === undefined) {
       // Documented chunk protocol: require.async on the package-local sibling
       // loads `<plugins>/zznobzz-dsh-inline-charts/client.chartjs.js?rev=<current>`
-      // — the flattened package name is one path segment — as a classic
+      // — the scoped package name is a two-segment path prefix — as a classic
       // script which registers the sibling factory and assigns window.Chart
       // (UMD). Failures are retryable (the promise is reset).
       chartLoadPromise = require.async('./client.chartjs.js').then(
@@ -379,81 +385,138 @@ window.__ModuleLoader__.load({ id: 'zznobzz-dsh-inline-charts', factory: (requir
   }
 
   // ---------------------------------------------------------------------------
-  // Node view: chooses widget/error card from node.data (the decoded envelope).
+  // Turn-tail row: one list entry per Turn; subscribes to the engine-published
+  // location data ('inline-charts' under ConversationTurnDataMap) and renders
+  // every widget of this Turn in anchorSeq order. Empty list -> null (the row
+  // contributes nothing). Widgets keep their data-inline-chart markers for the
+  // live acceptance checks.
   // ---------------------------------------------------------------------------
 
-  function InlineChartNodeView(props) {
-    const node = props.node;
-    const data = node !== undefined ? node.data : undefined;
-    if (data === undefined) return null;
-    if (data.status === 'error') return h(ErrorCard, { reason: data.reason });
-    if (data.status !== 'ok') return null;
-    return h(data.envelope.kind === 'chart-json' ? ChartWidget : HtmlWidget, {
-      key: node.key,
-      spec: data.envelope.spec,
-    });
+  function ChartTailRow(props) {
+    const turn = props.turn;
+    // Identity-stable subscribe/get pair per owner TurnLocation: the engine
+    // keeps one data store per Turn, so its keyed source listeners survive
+    // re-renders without resubscribing.
+    const sources = React.useMemo(() => ({
+      subscribe: (listener) => turn.data.source('inline-charts').subscribe(listener),
+      get: () => {
+        const value = turn.data.get('inline-charts');
+        return Array.isArray(value) ? value : undefined;
+      },
+    }), [turn]);
+    const items = React.useSyncExternalStore(sources.subscribe, sources.get);
+    if (items === undefined || items.length === 0) return null;
+    return h('div', {
+      style: { display: 'flex', flexDirection: 'column', gap: '8px' },
+      'data-inline-charts-row': String(turn.turn),
+    }, items.map((item) => h(item.status === 'error' ? ErrorCard : (item.envelope.kind === 'chart-json' ? ChartWidget : HtmlWidget), {
+      // callId is the stable item identity from the durable event; seq breaks
+      // any theoretical duplicate id within one Turn.
+      key: item.callId + ':' + item.seq,
+      reason: item.reason,
+      spec: item.status === 'ok' ? item.envelope.spec : undefined,
+    })));
   }
 
   // ---------------------------------------------------------------------------
-  // Conversation Definition (skeleton from plugin-api-notes.md §t13).
+  // Conversation Definition (v1.2: state-only accumulator + buildLocationData;
+  // no target, no keyed node kind — see t21 verdict / ui-schedule precedent).
   // ---------------------------------------------------------------------------
 
   /**
-   * Fold a decode outcome into Context state, or undefined when unrelated.
-   * State carries the anchor seq plus the renderer-facing slice only.
+   * Read the durable Turn coordinate of one accepted tool/result event.
+   * @param {object} event - Session event already validated by decodeChartEvent.
+   * @returns {number | undefined} the Turn number, or undefined when absent.
    */
-  function decodeToState(decoded, event) {
-    if (decoded.status === 'ignore') return undefined;
-    return {
-      status: decoded.status,
-      reason: decoded.reason,
-      envelope: decoded.envelope,
-      seq: typeof event.seq === 'number' ? event.seq : 0,
-    };
+  function eventTurnOf(event) {
+    const turn = event.data.turn;
+    return typeof turn === 'number' && Number.isSafeInteger(turn) ? turn : undefined;
+  }
+
+  /**
+   * Fold one accepted decode into the Turn's accumulated item list.
+   * Identity inside the list is the tool-call callId: a repeated result for
+   * the same call replaces its item instead of duplicating the widget.
+   * @param {object[]} items - current immutable list.
+   * @param {object} decoded - decodeChartEvent outcome (status ok|error).
+   * @param {object} event - the accepted tool/result event.
+   * @returns {object[]} new list when changed, otherwise the same reference.
+   */
+  function foldItem(items, decoded, event) {
+    const callId = String(event.data.message.source.callId);
+    const seq = typeof event.seq === 'number' ? event.seq : 0;
+    const next = decoded.status === 'ok'
+      ? { status: 'ok', callId, seq, envelope: decoded.envelope }
+      : { status: 'error', callId, seq, reason: decoded.reason };
+    for (let index = 0; index < items.length; index++) {
+      const previous = items[index];
+      if (previous.callId !== callId) continue;
+      // Replay-safe replacement keeps list order; identical content keeps identity.
+      if (previous.seq === next.seq && previous.status === next.status
+        && (previous.envelope === next.envelope || previous.reason === next.reason)) return items;
+      const copy = items.slice();
+      copy[index] = next;
+      return copy;
+    }
+    return items.concat([next]);
+  }
+
+  /**
+   * Sort by anchor seq without mutating; called only when the list changed.
+   * @param {object[]} items - accumulated widget items.
+   * @returns {object[]} items ordered by their durable event seq.
+   */
+  function sortedItems(items) {
+    let sorted = false;
+    for (let index = 1; index < items.length; index++) {
+      if (items[index].seq < items[index - 1].seq) { sorted = true; break; }
+    }
+    return sorted ? items.slice().sort((left, right) => left.seq - right.seq) : items;
   }
 
   const chartDefinition = {
-    kind: 'inline-chart',
-    target: 'chat',
+    // The engine requires published data.key === definition.kind, so this kind
+    // IS the ConversationTurnDataMap key 'inline-charts'.
+    kind: 'inline-charts',
+    // State-only Context: NO target and NO buildViewNode (assertDefinitionTarget
+    // accepts the pair only together; ui-schedule's schedule-created proves the
+    // data-only shape mounts and publishes live).
     // Function-form matcher: we claim ONLY our envelope; every other
     // tool/result returns null and still reaches the official tool-call
     // Definition and the unmatched-event fallback untouched.
     match(event) {
       const decoded = decodeChartEvent(event);
       if (decoded.status === 'ignore') return null;
-      const callId = event.data.message.source.callId;
-      // One tool call = one widget context; replay/fork reuse the same id.
-      return { id: String(callId), role: 'start' };
+      // One Context per Turn owns that Turn's whole widget list; the per-call
+      // identity lives inside each item (callId).
+      return { id: String(event.data.turn), role: 'start' };
     },
     start(context, match) {
-      const state = decodeToState(decodeChartEvent(match.event), match.event);
-      return state === undefined
-        ? { status: 'error', reason: 'Пустой результат графика.', seq: match.event.seq }
-        : state;
+      const decoded = decodeChartEvent(match.event);
+      // Prefer the event's own durable coordinate; fall back to the Context id
+      // (which is exactly that number) so state.turn is always numeric.
+      const fromEvent = eventTurnOf(match.event);
+      return {
+        turn: Number.isSafeInteger(fromEvent) ? fromEvent : Number(context.id),
+        items: sortedItems(foldItem([], decoded, match.event)),
+      };
     },
     update(context, match) {
-      // A second accepted result for the same callId replaces the state
-      // (v1 does not promise targeted updates, but staying consistent costs nothing).
-      const state = decodeToState(decodeChartEvent(match.event), match.event);
-      return state === undefined ? context.state : state;
+      const decoded = decodeChartEvent(match.event);
+      const folded = foldItem(context.state.items, decoded, match.event);
+      // Same-reference state means zero downstream re-publication.
+      if (folded === context.state.items) return context.state;
+      return { ...context.state, items: sortedItems(folded) };
     },
-    buildViewNode(context) {
+    buildLocationData(context, scope, previous) {
+      if (scope !== 'turn') return null;
       const state = context.state;
       if (state === undefined) return null;
-      const start = context.start !== undefined ? context.start : context.matches[0];
-      const location = start !== undefined
-        ? start.location
-        : { kind: 'unresolved' };
-      return {
-        key: context.key,
-        kind: 'inline-chart',
-        id: context.id,
-        target: 'chat',
-        anchorSeq: start !== undefined ? start.event.seq : state.seq,
-        location: location,
-        visibility: 'visible',
-        data: { status: state.status, reason: state.reason, envelope: state.envelope },
-      };
+      // Identity-stable passthrough while the list is unchanged (engine also
+      // dedupes by value, but returning `previous` keeps object churn at zero).
+      if (previous !== null && previous.kind === 'turn'
+        && previous.turn === state.turn && previous.value === state.items) return previous;
+      return { kind: 'turn', turn: state.turn, key: 'inline-charts', value: state.items };
     },
   };
 
@@ -465,16 +528,20 @@ window.__ModuleLoader__.load({ id: 'zznobzz-dsh-inline-charts', factory: (requir
     // Service dependencies (export-level `inject`, NOT dsh.client.inject ordering).
     inject: ['slots', 'uiConversation'],
     apply(ctx) {
-      // Definition first: without it the keyed slot entry would never receive a node.
+      // Definition owns the per-Turn accumulator and publishes location data;
+      // without it the tail row would read nothing.
       ctx.effect(
         () => ctx.uiConversation.events.register(chartDefinition),
         'inline-charts: conversation definition',
       );
-      // Keyed renderer under our own kind; official keys stay intact.
-      ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
-        name: 'conversation.chat.node',
-        key: 'inline-chart',
-      }, InlineChartNodeView));
+      // One list entry in the official turnTail seat (ui-plan/ui-schedule
+      // precedents); order 5 keeps it first among feature tails. The owner
+      // supplies {turn, seq, openFile}; we render only when our Turn has items.
+      ctx.slots.inject('conversation.chat.turnTail', () => ctx.slots.register({
+        name: 'conversation.chat.turnTail',
+        id: 'inline-charts.row',
+        order: 5,
+      }, ChartTailRow));
     },
   };
 } });

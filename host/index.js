@@ -14,7 +14,7 @@
  * Registration follows host-api-notes.md §1 (ctx.tools.register + defineTool)
  * and §2 (ctx.systemPrompt.section, order 9100).
  *
- * @module @local/inline-charts/host
+ * @module zznobzz-dsh-inline-charts/host
  */
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
