@@ -80,19 +80,35 @@ plugins/inline-charts/
 Клиентская половина рисует inline-виджеты из durable `tool/result.meta`; fence-блоки
 в тексте модели не парсятся (они человекочитаемая транскрипт-форма).
 
-**Механизм v1.2** (вердикт t21: keyed слот `conversation.chat.node` закры таблицой
+**Механизм v1.2 + v1.3** (вердикт t21: keyed слот `conversation.chat.node` закры таблицой
 `ChatNodeKind` — plain-JS плагин не может добавить свой kind; прецеденты ui-schedule /
-ui-plan):
+ui-plan; v1.3 по вердикту t25: run_code-вызовы пишут `tool/ptc-dispatch` без message/
+surfaceOp/turn — нужен второй carrier):
 
 1. State-only Conversation Definition `{kind:'inline-charts'}` (БЕЗ target/buildViewNode)
    регистрируется через `ctx.uiConversation.events.register` внутри `ctx.effect`.
-   Матчит append-surface `tool/result` при presence+валидности
-   `event.data.meta.{protocol:'dsh.inline-chart', version:1, kind, spec}` и
-   `message.isError !== true`. Identity Context'а — **номер turn'а**
+   Матчит ДВА durable-события:
+   - `tool/result` (append-surface, presence+валидность
+     `event.data.meta.{protocol:'dsh.inline-chart', version:1, kind, spec}`,
+     `message.isError !== true`, identity элемента — `source.callId`);
+   - `tool/ptc-dispatch` (settled PTC sub-dispatch из run_code, ptc.ts:550): фильтр
+     `data.name === 'render_chart'`, `isError !== true`, отсутствие `data.error`,
+     envelope в `data.meta`, identity элемента — `data.subCallId`. У ptc-dispatch НЕТ
+     поля turn и match() получает только событие, поэтому identity Context'а —
+     `'run:'+rootCallId` (все графики одного run_code = один Context = один владелец
+     ключа), а номер turn'а резолвится из engine-resolved match Location
+     (`location.turn.turn`; движок обновляет его replay'ом при приходе границ) и
+     публикуется только после разрешения — при unresolved location публикация `null`.
+   Identity Context'а для model-direct событий — **номер turn'а**
    (`String(event.data.turn)`): один Context накапливает все графики своего turn'а,
-   а identity отдельного вызова (`callId`) сохраняется внутри элемента списка и служит
-   ключом дедупликации/замены (replay/fork воспроизводят и то, и другое). Чужие tool
-   results возвращают `null` и остаются штатному рендеру.
+   identity отдельного вызова сохраняется внутри элемента списка и служит ключом
+   дедупликации/замены (replay/fork воспроизводят и то, и другое). Чужие события
+   возвращают `null` и остаются штатному рендеру.
+   Self-check в buildLocationData гарантирует `data.key === definition.kind`
+   (assembler.ts:1017 иначе бросает) с явным `console.error '[inline-charts] key!=kind'`.
+   Диагностика (t26): консоль-строки с префиксом `[inline-charts]` — factory executed /
+   apply / match hit|miss (тип события + keys payload без тел) / locData scope+turn+n /
+   row render; miss-лог только для двух наших типов событий.
 2. Definition публикует накопленный список через `buildLocationData(scope:'turn')`
    под ключом `'inline-charts'` (движок требует `data.key === definition.kind`) в
    `ConversationTurnDataMap` — type-only расширение через `declare module` в TS-проектах;

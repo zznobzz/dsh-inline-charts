@@ -40,6 +40,10 @@ window.__ModuleLoader__.load({ id: 'zznobzz-dsh-inline-charts', factory: (requir
   const React = require('react');
   const h = React.createElement;
 
+  /** Diagnostic prefix shared by every console line of this plugin (t26). */
+  const LOG = '[inline-charts]';
+  console.log(LOG, 'factory executed');
+
   // ---------------------------------------------------------------------------
   // Wire constants — must stay in sync with host/index.js (PROTOCOL/VERSION).
   // ---------------------------------------------------------------------------
@@ -89,22 +93,25 @@ window.__ModuleLoader__.load({ id: 'zznobzz-dsh-inline-charts', factory: (requir
    */
   function decodeChartEvent(event) {
     if (typeof event !== 'object' || event === null) return { status: 'ignore' };
-    if (event.type !== 'tool/result') return { status: 'ignore' };
-    // surfaceOp check mirrors isAppendSurfaceEvent without importing dsh-session
-    // at runtime: only plain appends open/update our Context.
-    if (event.surfaceOp !== 'append') return { status: 'ignore' };
-    const data = event.data;
-    if (typeof data !== 'object' || data === null) return { status: 'ignore' };
-    if (typeof data.error === 'object' && data.error !== null) return { status: 'ignore' };
-    const message = data.message;
-    if (typeof message !== 'object' || message === null) return { status: 'ignore' };
-    if (message.role !== 'tool' || message.isError === true) return { status: 'ignore' };
-    const source = message.source;
-    if (typeof source !== 'object' || source === null
-      || source.kind !== 'tool' || typeof source.callId !== 'string' || source.callId === '') {
-      return { status: 'ignore' };
-    }
-    const meta = data.meta;
+    // v1.3: two durable carriers of a render_chart outcome.
+    // - model-direct tool call: `tool/result` (surface append, envelope in
+    //   data.meta, identity in data.message.source.callId);
+    // - run_code PTC sub-dispatch: `tool/ptc-dispatch` (log-only, NO message/
+    //   surfaceOp and NO turn field; name must be our tool, identity is
+    //   data.subCallId, envelope again in data.meta). Precedent for matching
+    //   both: ui-plan submittedPlan / ui-chat tool definition.
+    if (event.type === 'tool/result') return decodeToolResult(event);
+    if (event.type === 'tool/ptc-dispatch') return decodePtcDispatch(event);
+    return { status: 'ignore' };
+  }
+
+  /**
+   * Shared marker gate: presence + protocol + version + spec validation and
+   * size bounds, identical for both carriers.
+   * @param {unknown} meta - candidate presentation meta from the event data.
+   * @returns {{status: string, reason?: string, envelope?: object}}
+   */
+  function decodeEnvelope(meta) {
     // Presence gate: no meta or a foreign meta is simply not ours.
     if (typeof meta !== 'object' || meta === null) return { status: 'ignore' };
     if (meta.protocol !== PROTOCOL) return { status: 'ignore' };
@@ -122,6 +129,38 @@ window.__ModuleLoader__.load({ id: 'zznobzz-dsh-inline-charts', factory: (requir
       return { status: 'error', reason: 'Полезная графика превышает лимит ' + MAX_ENVELOPE_BYTES + ' UTF-8 байт.' };
     }
     return { status: 'ok', envelope: meta };
+  }
+
+  /** v1.1 branch (unchanged): model-direct `tool/result` surface append. */
+  function decodeToolResult(event) {
+    // surfaceOp check mirrors isAppendSurfaceEvent without importing dsh-session
+    // at runtime: only plain appends open/update our Context.
+    if (event.surfaceOp !== 'append') return { status: 'ignore' };
+    const data = event.data;
+    if (typeof data !== 'object' || data === null) return { status: 'ignore' };
+    if (typeof data.error === 'object' && data.error !== null) return { status: 'ignore' };
+    const message = data.message;
+    if (typeof message !== 'object' || message === null) return { status: 'ignore' };
+    if (message.role !== 'tool' || message.isError === true) return { status: 'ignore' };
+    const source = message.source;
+    if (typeof source !== 'object' || source === null
+      || source.kind !== 'tool' || typeof source.callId !== 'string' || source.callId === '') {
+      return { status: 'ignore' };
+    }
+    return decodeEnvelope(data.meta);
+  }
+
+  /** v1.3 branch: settled `tool/ptc-dispatch` of render_chart inside run_code. */
+  function decodePtcDispatch(event) {
+    const data = event.data;
+    if (typeof data !== 'object' || data === null) return { status: 'ignore' };
+    // PTC dispatch names its tool right on the event — unlike tool/result, the
+    // identity here IS authenticated by name (plus the meta marker).
+    if (data.name !== 'render_chart') return { status: 'ignore' };
+    if (typeof data.error === 'object' && data.error !== null) return { status: 'ignore' };
+    if (data.isError === true) return { status: 'ignore' };
+    if (typeof data.subCallId !== 'string' || data.subCallId === '') return { status: 'ignore' };
+    return decodeEnvelope(data.meta);
   }
 
   function safeStringify(value) {
@@ -405,6 +444,11 @@ window.__ModuleLoader__.load({ id: 'zznobzz-dsh-inline-charts', factory: (requir
       },
     }), [turn]);
     const items = React.useSyncExternalStore(sources.subscribe, sources.get);
+    // Diagnostic: one compact line per actual data change (render commit), not
+    // per re-render — the effect deps are the published list identity.
+    React.useEffect(() => {
+      console.log(LOG, 'row render', 'turn=' + turn.turn, 'n=' + (items === undefined ? 'none' : items.length));
+    }, [items]);
     if (items === undefined || items.length === 0) return null;
     return h('div', {
       style: { display: 'flex', flexDirection: 'column', gap: '8px' },
@@ -419,31 +463,52 @@ window.__ModuleLoader__.load({ id: 'zznobzz-dsh-inline-charts', factory: (requir
   }
 
   // ---------------------------------------------------------------------------
-  // Conversation Definition (v1.2: state-only accumulator + buildLocationData;
-  // no target, no keyed node kind — see t21 verdict / ui-schedule precedent).
+  // Conversation Definition (v1.3: state-only accumulator + buildLocationData;
+  // no target, no keyed node kind — see t21 verdict / ui-schedule precedent.
+  // v1.3 adds the `tool/ptc-dispatch` carrier for run_code-dispatched calls).
   // ---------------------------------------------------------------------------
 
   /**
-   * Read the durable Turn coordinate of one accepted tool/result event.
+   * Read the durable Turn coordinate of one accepted event.
+   * `tool/result` carries data.turn directly; `tool/ptc-dispatch` has NO turn
+   * field (log-only PTC payload), so its number comes from the match Location
+   * resolved by the engine (`match.location.turn.turn`).
    * @param {object} event - Session event already validated by decodeChartEvent.
-   * @returns {number | undefined} the Turn number, or undefined when absent.
+   * @param {object} [location] - engine-resolved Location of this match.
+   * @returns {number | undefined} the Turn number, or undefined when unresolved.
    */
-  function eventTurnOf(event) {
-    const turn = event.data.turn;
-    return typeof turn === 'number' && Number.isSafeInteger(turn) ? turn : undefined;
+  function eventTurnOf(event, location) {
+    const direct = event.data.turn;
+    if (typeof direct === 'number' && Number.isSafeInteger(direct)) return direct;
+    if (location !== undefined && (location.kind === 'turn' || location.kind === 'step')) {
+      const turn = location.turn.turn;
+      if (Number.isSafeInteger(turn)) return turn;
+    }
+    return undefined;
+  }
+
+  /**
+   * Stable per-call identity of one accepted event: tool/result rides
+   * message.source.callId, ptc-dispatch rides data.subCallId.
+   * @param {object} event - accepted chart event (either carrier).
+   * @returns {string} the call identity used for list dedupe/replacement.
+   */
+  function eventCallId(event) {
+    if (event.type === 'tool/ptc-dispatch') return String(event.data.subCallId);
+    return String(event.data.message.source.callId);
   }
 
   /**
    * Fold one accepted decode into the Turn's accumulated item list.
-   * Identity inside the list is the tool-call callId: a repeated result for
+   * Identity inside the list is the tool-call id: a repeated result for
    * the same call replaces its item instead of duplicating the widget.
    * @param {object[]} items - current immutable list.
    * @param {object} decoded - decodeChartEvent outcome (status ok|error).
-   * @param {object} event - the accepted tool/result event.
+   * @param {object} event - the accepted chart event.
    * @returns {object[]} new list when changed, otherwise the same reference.
    */
   function foldItem(items, decoded, event) {
-    const callId = String(event.data.message.source.callId);
+    const callId = eventCallId(event);
     const seq = typeof event.seq === 'number' ? event.seq : 0;
     const next = decoded.status === 'ok'
       ? { status: 'ok', callId, seq, envelope: decoded.envelope }
@@ -474,6 +539,24 @@ window.__ModuleLoader__.load({ id: 'zznobzz-dsh-inline-charts', factory: (requir
     return sorted ? items.slice().sort((left, right) => left.seq - right.seq) : items;
   }
 
+  /**
+   * Compact payload-key fingerprint for diagnostics (never logs envelope
+   * bodies — only the shape the decoder saw).
+   * @param {object} event - candidate chart event.
+   * @returns {string} short description of the discriminating fields.
+   */
+  function payloadShape(event) {
+    const data = typeof event.data === 'object' && event.data !== null ? event.data : {};
+    if (event.type === 'tool/ptc-dispatch') {
+      return 'name=' + String(data.name) + ' subCallId=' + String(data.subCallId)
+        + ' isError=' + String(data.isError) + ' metaKeys=' + Object.keys(data.meta || {}).join(',');
+    }
+    const message = typeof data.message === 'object' && data.message !== null ? data.message : {};
+    const source = typeof message.source === 'object' && message.source !== null ? message.source : {};
+    return 'surfaceOp=' + String(event.surfaceOp) + ' callId=' + String(source.callId)
+      + ' isError=' + String(message.isError) + ' metaKeys=' + Object.keys(data.meta || {}).join(',');
+  }
+
   const chartDefinition = {
     // The engine requires published data.key === definition.kind, so this kind
     // IS the ConversationTurnDataMap key 'inline-charts'.
@@ -481,41 +564,93 @@ window.__ModuleLoader__.load({ id: 'zznobzz-dsh-inline-charts', factory: (requir
     // State-only Context: NO target and NO buildViewNode (assertDefinitionTarget
     // accepts the pair only together; ui-schedule's schedule-created proves the
     // data-only shape mounts and publishes live).
-    // Function-form matcher: we claim ONLY our envelope; every other
-    // tool/result returns null and still reaches the official tool-call
+    // Function-form matcher: we claim ONLY our envelope on both carriers
+    // (tool/result surface append; tool/ptc-dispatch settled run_code call);
+    // every other event returns null and still reaches the official tool-call
     // Definition and the unmatched-event fallback untouched.
     match(event) {
+      if (event.type !== 'tool/result' && event.type !== 'tool/ptc-dispatch') return null;
       const decoded = decodeChartEvent(event);
-      if (decoded.status === 'ignore') return null;
+      if (decoded.status === 'ignore') {
+        console.log(LOG, 'match miss', event.type, payloadShape(event));
+        return null;
+      }
       // One Context per Turn owns that Turn's whole widget list; the per-call
-      // identity lives inside each item (callId).
-      return { id: String(event.data.turn), role: 'start' };
+      // identity lives inside each item (callId / subCallId). CRITICAL: exactly
+      // ONE publisher per Turn store key — two Contexts of this kind resolving
+      // to the same Turn would make the engine throw 'already owned'
+      // (location-index set()). ptc-dispatch carries NO turn field and match()
+      // sees only the bare event, so its numeric Turn is unknowable at match
+      // time. The stable grouping that never collides is the ROOT CALL: all
+      // charts dispatched by one run_code program share rootCallId, and one
+      // root call belongs to exactly one Turn, so id='run:'+rootCallId yields a
+      // single publisher per run. Its Turn resolves from the engine-attached
+      // match Location (dispatchInput indexes coordinates before handlers run;
+      // refreshMatchLocations replays start() when a boundary lands later) and
+      // is adopted in start/update below. A model-direct tool/result keeps the
+      // numeric data.turn id — different id space, and both carriers can only
+      // describe the SAME widget if the same call arrived twice, which cannot
+      // cross carriers (a call is either model-direct or PTC), so no double
+      // publisher exists for one chart. Two concurrent run_code programs in one
+      // Turn WOULD collide on the store key; the buildLocationData self-check +
+      // [inline-charts] logs surface that loudly instead of silently doubling.
+      const turn = eventTurnOf(event, undefined);
+      if (turn === undefined) {
+        const rootCallId = event.data.rootCallId;
+        if (typeof rootCallId !== 'string' || rootCallId === '') {
+          console.log(LOG, 'match miss (no turn coordinate)', event.type, payloadShape(event));
+          return null;
+        }
+      }
+      const id = turn === undefined ? 'run:' + String(event.data.rootCallId) : String(turn);
+      console.log(LOG, 'match hit', event.type, 'id=' + id, 'status=' + decoded.status);
+      return { id, role: 'start' };
     },
     start(context, match) {
       const decoded = decodeChartEvent(match.event);
-      // Prefer the event's own durable coordinate; fall back to the Context id
-      // (which is exactly that number) so state.turn is always numeric.
-      const fromEvent = eventTurnOf(match.event);
+      // Turn number: durable data.turn for tool/result; for a run-rooted
+      // pending Context the engine-resolved match Location once it points at a
+      // Turn (refreshMatchLocations replays start() with the resolved
+      // Location), otherwise undefined — publish stays suppressed (see
+      // buildLocationData) so no wrong-Turn file or ownership throw happens.
+      const fromEvent = eventTurnOf(match.event, match.location);
       return {
-        turn: Number.isSafeInteger(fromEvent) ? fromEvent : Number(context.id),
+        turn: fromEvent,
         items: sortedItems(foldItem([], decoded, match.event)),
       };
     },
     update(context, match) {
       const decoded = decodeChartEvent(match.event);
       const folded = foldItem(context.state.items, decoded, match.event);
+      // A pending ('run:<rootCallId>') Context adopts the Turn as soon as the
+      // match Location resolves; once numeric it never changes again.
+      const fromEvent = eventTurnOf(match.event, match.location);
+      const turn = context.state.turn !== undefined ? context.state.turn : fromEvent;
       // Same-reference state means zero downstream re-publication.
-      if (folded === context.state.items) return context.state;
-      return { ...context.state, items: sortedItems(folded) };
+      if (folded === context.state.items && turn === context.state.turn) return context.state;
+      return { ...context.state, turn, items: sortedItems(folded) };
     },
     buildLocationData(context, scope, previous) {
       if (scope !== 'turn') return null;
       const state = context.state;
       if (state === undefined) return null;
+      // v1.3 acceptance: an unresolved/pending turn publishes NOTHING (null)
+      // instead of throwing or misfiling under a wrong Turn.
+      if (!Number.isSafeInteger(state.turn) || state.turn < 0) {
+        console.log(LOG, 'locData skip: turn unresolved id=' + context.id, 'scope=' + scope);
+        return null;
+      }
+      // Self-check: the engine throws when data.key !== definition.kind
+      // (assembler.ts:1017). Fail loudly HERE with a readable line instead.
+      if (chartDefinition.kind !== 'inline-charts') {
+        console.error(LOG, 'key!=kind', 'kind=' + String(chartDefinition.kind), 'expected=inline-charts');
+        return null;
+      }
       // Identity-stable passthrough while the list is unchanged (engine also
       // dedupes by value, but returning `previous` keeps object churn at zero).
       if (previous !== null && previous.kind === 'turn'
         && previous.turn === state.turn && previous.value === state.items) return previous;
+      console.log(LOG, 'locData scope=turn', 'turn=' + state.turn, 'n=' + state.items.length);
       return { kind: 'turn', turn: state.turn, key: 'inline-charts', value: state.items };
     },
   };
@@ -528,6 +663,7 @@ window.__ModuleLoader__.load({ id: 'zznobzz-dsh-inline-charts', factory: (requir
     // Service dependencies (export-level `inject`, NOT dsh.client.inject ordering).
     inject: ['slots', 'uiConversation'],
     apply(ctx) {
+      console.log(LOG, 'apply: registering definition + turnTail row');
       // Definition owns the per-Turn accumulator and publishes location data;
       // without it the tail row would read nothing.
       ctx.effect(
